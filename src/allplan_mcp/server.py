@@ -184,10 +184,11 @@ def execute_python(
     Return data by assigning `result` (JSON-safe values; other objects come back as
     repr) or by passing `result_expression`; print() output is returned as stdout.
 
-    Not allowed: import, class, async, yield, match, global; names or attributes
-    starting with '_'; str.format / format_map (use f-strings); eval, exec, getattr,
-    open. Attribute writes only work on properties (point.X = 5), not on modules,
-    classes or coord_input.
+    Not allowed: import, class, async, yield, match, global, decorators; names or
+    attributes starting with '_'; str.format / format_map (use f-strings); eval,
+    exec, getattr, open. Attribute writes only work on properties (point.X = 5),
+    not on modules, classes or coord_input. Objects from outside the Allplan API
+    are refused wherever they are used.
     """
 
     if not code.strip():

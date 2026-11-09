@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import builtins
+import contextlib
 import os
 import sys
 import types
@@ -32,6 +33,11 @@ class Point3D:
         return sum(c * c for c in self._coords) ** 0.5
 
 
+# Real Allplan classes and functions live in NemAll_Python_* modules (Boost.Python).
+Point3D.__module__ = "NemAll_Python_Geometry"
+Point3D.Length.__module__ = "NemAll_Python_Geometry"
+
+
 for module_name in ALLPLAN_MODULES:
     sys.modules.setdefault(module_name, types.ModuleType(module_name))
 geometry_module = sys.modules["NemAll_Python_Geometry"]
@@ -47,6 +53,33 @@ from sandbox import SandboxExecutor, SandboxValidationError  # noqa: E402
 class CoordInput:
     def GetInputViewDocument(self) -> str:
         return "document"
+
+
+CoordInput.__module__ = "NemAll_Python_IFW_Input"
+CoordInput.GetInputViewDocument.__module__ = "NemAll_Python_IFW_Input"
+
+
+class LeakyApiObject:
+    """An allowed (Allplan-typed) object whose methods hand out os.getcwd"""
+
+    def Get(self):
+        return os.getcwd
+
+    def __getitem__(self, index):
+        return os.getcwd
+
+    def __iter__(self):
+        return iter([os.getcwd])
+
+    def __enter__(self):
+        return os.getcwd
+
+    def __exit__(self, *exc_info):
+        return False
+
+
+LeakyApiObject.__module__ = "NemAll_Python_Geometry"
+LeakyApiObject.Get.__module__ = "NemAll_Python_Geometry"
 
 
 def run(code: str, result_expression: str | None = None) -> dict:
@@ -92,6 +125,25 @@ class AllowedCodeTest(unittest.TestCase):
             "result = [p.X, p.Y, q.Length(), names, f'{3.14159:.2f}', coord_input.GetInputViewDocument()]\n"
         )
         self.assertEqual(run(code)["result"], [11, 2, 5.0, ["A, B"], "3.14", "document"])
+
+    def test_higher_order_builtins_unpacking_and_dicts(self) -> None:
+        code = (
+            "points = [AllplanGeo.Point3D(x, 0, 0) for x in (3, 1, 2)]\n"
+            "ordered = [p.X for p in sorted(points, key=lambda p: p.X)]\n"
+            "doubled = list(map(lambda v: v * 2, ordered))\n"
+            "first, *rest = doubled\n"
+            "totals = {}\n"
+            "for name, value in {'a': 1, 'b': 2}.items():\n"
+            "    totals[name] = value * 10\n"
+            "def outer(n):\n"
+            "    def inner(m):\n"
+            "        return m + 1\n"
+            "    return inner(n)\n"
+            "result = [ordered, first, rest, totals, outer(1), max(points, key=lambda p: p.X).X]\n"
+        )
+        self.assertEqual(
+            run(code)["result"], [[1, 2, 3], 2, [4, 6], {"a": 10, "b": 20}, 2, 3]
+        )
 
 
 class EscapeTest(unittest.TestCase):
@@ -175,25 +227,68 @@ class MonkeypatchTest(unittest.TestCase):
 
 
 class LeakyModuleTest(unittest.TestCase):
-    """An exposed module that happens to hold OS-level objects"""
+    """An exposed module that happens to hold OS-level objects.
+
+    Each one must be unusable whatever the channel that brings it in.
+    """
+
+    leaks = {
+        "os": os,
+        "getcwd": os.getcwd,
+        "leaked_open": builtins.open,
+        "leaked_eval": builtins.eval,
+        "pyfunc": os.path.join,
+        "bucket": [os.getcwd],
+        "mapping": {"k": os.getcwd},
+        "pairs": [("cwd", os.getcwd)],
+        "cm": contextlib.nullcontext(os.getcwd),
+        "env": os.environ,
+        "stdout": sys.stdout,
+        "api": LeakyApiObject(),
+    }
 
     def setUp(self) -> None:
-        geometry_module.os = os
-        geometry_module.getcwd = os.getcwd
-        geometry_module.leaked_open = builtins.open
+        for name, value in self.leaks.items():
+            setattr(geometry_module, name, value)
 
     def tearDown(self) -> None:
-        for name in ("os", "getcwd", "leaked_open"):
+        for name in self.leaks:
             delattr(geometry_module, name)
 
-    def test_foreign_module_and_functions_blocked(self) -> None:
+    def test_leaked_objects_unusable(self) -> None:
         for code in (
+            # attribute channel
             "result = AllplanGeo.os.getcwd()",
             "result = AllplanGeo.getcwd()",
             "result = AllplanGeo.leaked_open('x.txt', 'w')",
+            "result = AllplanGeo.leaked_eval('1')",
+            "result = AllplanGeo.pyfunc('a', 'b')",
+            "result = AllplanGeo.env['PATH']",
+            "result = AllplanGeo.stdout.write('x')",
+            # subscript, dict, iteration, with, call result
+            "fn = AllplanGeo.bucket[0]\nresult = fn()",
+            "result = AllplanGeo.mapping['k']()",
+            "for name, fn in AllplanGeo.pairs:\n    result = fn()",
+            "with AllplanGeo.cm as fn:\n    result = fn()",
+            # an allowed API object handing out a dangerous callable
+            "fn = AllplanGeo.api.Get()\nresult = 1",
+            "result = AllplanGeo.api[0]()",
+            "for fn in AllplanGeo.api:\n    result = fn()",
+            "fn, = AllplanGeo.api\nresult = fn()",
+            "with AllplanGeo.api as fn:\n    result = fn()",
+            "result = [fn() for fn in AllplanGeo.api]",
+            # passed to higher-order builtins, unpacked
+            "fn = AllplanGeo.bucket[0]\nresult = list(map(fn, []))",
+            "fn = AllplanGeo.bucket[0]\nresult = sorted([1], key=fn)",
+            "(fn,) = AllplanGeo.bucket\nresult = fn()",
+            "print('x', file=AllplanGeo.mapping['k'])",
         ):
             with self.subTest(code=code), self.assertRaises(SandboxValidationError):
                 run(code)
+
+    def test_decorators_blocked(self) -> None:
+        with self.assertRaises(SandboxValidationError):
+            run("fn = AllplanGeo.bucket[0]\n@fn\ndef f():\n    return 1\n")
 
 
 if __name__ == "__main__":

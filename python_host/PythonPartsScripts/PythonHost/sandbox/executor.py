@@ -13,7 +13,7 @@ import NemAll_Python_Geometry as AllplanGeo
 import NemAll_Python_IFW_Input as AllplanIFW
 
 from .const import allowed_builtin_names
-from .guard import GUARD_GETATTR_NAME, GUARD_SETATTR_TARGET_NAME, AttributeGuard, compile_guarded
+from .guard import SandboxGuard, compile_guarded
 from .validator import SandboxValidator
 
 
@@ -60,14 +60,12 @@ class SandboxExecutor:
             "AllplanBasisElements": AllplanBasisElements,
             "AllplanBaseEle": AllplanBaseEle,
         }
-        guard = AttributeGuard(modules.values())
         exec_scope = {
             "__builtins__": self.safe_builtins(),
-            GUARD_GETATTR_NAME: guard.getattr,
-            GUARD_SETATTR_TARGET_NAME: guard.setattr_target,
             "coord_input": self.coord_input,
             **modules,
         }
+        SandboxGuard(modules.values(), exec_scope).install()
         stdout_buffer = io.StringIO()
 
         with contextlib.redirect_stdout(stdout_buffer):

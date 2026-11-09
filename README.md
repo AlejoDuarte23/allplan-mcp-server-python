@@ -165,20 +165,30 @@ or the rest of the interpreter.
 Layers (`python_host/PythonPartsScripts/PythonHost/sandbox/`):
 
 1. Static checks (`validator.py`): no `import`, `global`, `class`, `async`,
-   `yield`, `match`; no name, parameter or attribute starting with `_`; no
-   introspection attributes (`gi_frame`, `f_globals`, `tb_frame`, `mro`, ...);
-   no `str.format` / `format_map` (they read attributes unchecked, use f-strings);
-   no `eval`, `exec`, `getattr`, `open`, ...
+   `yield`, `match`, decorators; no name, parameter or attribute starting with
+   `_`; no introspection attributes (`gi_frame`, `f_globals`, `tb_frame`, `mro`,
+   ...); no `str.format` / `format_map` (they read attributes unchecked, use
+   f-strings); no `eval`, `exec`, `getattr`, `open`, ...
 2. Runtime guard (`guard.py`), same principle as RestrictedPython: the code is
-   rewritten so that every attribute access goes through `AttributeGuard`.
-   - Reads: refused on and to frames, code objects, tracebacks, generators and
-     coroutines, to modules other than the exposed ones, and to C functions of
-     other modules (`os.system`, `io.open`), whatever the attribute is called.
-   - Writes and `del`: only properties of objects (`point.X = 5`). Modules,
-     classes and shared objects such as `coord_input` cannot be monkeypatched,
-     so trusted code (this bridge, the PythonParts framework) never ends up
-     calling sandbox code.
+   rewritten so that values are checked where they are *used*, whatever brought
+   them in (attribute, subscript, iteration, `with`, call result):
+   - every attribute read, every call (callee and arguments, so `map(f, ...)` or
+     `sorted(key=f)` are covered too), every subscript, iteration, unpacking and
+     `with` goes through `SandboxGuard`;
+   - refused values: frames, code objects, tracebacks; modules other than the
+     exposed ones; Python functions not defined by the sandboxed code; C
+     functions bound to such objects (`os.system`, `io.open`, `builtins.eval`);
+     classes and instances from modules other than `builtins`, `Boost.Python`
+     and `NemAll_Python_*` (file objects, `os.environ`, `subprocess.Popen`...);
+   - attribute writes and `del`: only properties of objects (`point.X = 5`).
+     Modules, classes and shared objects such as `coord_input` cannot be
+     monkeypatched, so trusted code (this bridge, the PythonParts framework)
+     never ends up calling sandbox code.
 3. Builtins: only a small allowlist (`len`, `range`, `print`, `sorted`, ...).
+
+The policy trusts what comes from the Allplan API (`NemAll_Python_*` modules and
+Boost.Python types). If a legitimate Allplan object is refused, the error names
+its type and module (`... leads to a <module>.<Type> object`): report it.
 
 Regression tests, including known escapes, run without Allplan:
 

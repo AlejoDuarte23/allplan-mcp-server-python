@@ -1,9 +1,9 @@
 from .executor import SandboxExecutor
-from .guard import AttributeGuard
+from .guard import SandboxGuard
 from .validator import SandboxValidationError, SandboxValidator
 
 __all__ = [
-    "AttributeGuard",
+    "SandboxGuard",
     "SandboxExecutor",
     "SandboxValidationError",
     "SandboxValidator",

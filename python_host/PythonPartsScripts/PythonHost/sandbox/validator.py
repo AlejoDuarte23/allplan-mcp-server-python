@@ -90,6 +90,9 @@ class SandboxAstValidator(ast.NodeVisitor):
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         check_identifier("function name", node.name)
+        if node.decorator_list:
+            # The decorator call is implicit, it would bypass the call guard.
+            raise SandboxValidationError("decorators are not allowed in execute_python.")
         self.generic_visit(node)
 
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
