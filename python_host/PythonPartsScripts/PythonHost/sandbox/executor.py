@@ -13,6 +13,7 @@ import NemAll_Python_Geometry as AllplanGeo
 import NemAll_Python_IFW_Input as AllplanIFW
 
 from .const import allowed_builtin_names
+from .guard import GUARD_GETATTR_NAME, GUARD_SETATTR_TARGET_NAME, AttributeGuard, compile_guarded
 from .validator import SandboxValidator
 
 
@@ -44,13 +45,14 @@ class SandboxExecutor:
         if result_expression is not None and not isinstance(result_expression, str):
             raise Exception("'result_expression' must be a string when provided.")
 
-        self.validator.validate_exec(code)
-        if result_expression:
-            self.validator.validate_eval(result_expression)
+        compiled_code = compile_guarded(self.validator.validate_exec(code), "exec")
+        compiled_result = (
+            compile_guarded(self.validator.validate_eval(result_expression), "eval")
+            if result_expression
+            else None
+        )
 
-        exec_scope = {
-            "__builtins__": self.safe_builtins(),
-            "coord_input": self.coord_input,
+        modules = {
             "AllplanGeo": AllplanGeo,
             "AllplanIFW": AllplanIFW,
             "AllplanSettings": AllplanSettings,
@@ -58,13 +60,21 @@ class SandboxExecutor:
             "AllplanBasisElements": AllplanBasisElements,
             "AllplanBaseEle": AllplanBaseEle,
         }
+        guard = AttributeGuard(modules.values())
+        exec_scope = {
+            "__builtins__": self.safe_builtins(),
+            GUARD_GETATTR_NAME: guard.getattr,
+            GUARD_SETATTR_TARGET_NAME: guard.setattr_target,
+            "coord_input": self.coord_input,
+            **modules,
+        }
         stdout_buffer = io.StringIO()
 
         with contextlib.redirect_stdout(stdout_buffer):
-            exec(code, exec_scope, exec_scope)
+            exec(compiled_code, exec_scope, exec_scope)
 
-            if result_expression:
-                result_value = eval(result_expression, exec_scope, exec_scope)
+            if compiled_result is not None:
+                result_value = eval(compiled_result, exec_scope, exec_scope)
             else:
                 result_value = exec_scope.get("result")
 

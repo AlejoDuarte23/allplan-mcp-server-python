@@ -153,21 +153,48 @@ depend on cross imports between skill folders.
 
 The bridge exposes a sandboxed Python execution path for local experiments.
 
-Behavior:
-
 - The raw Allplan bridge accepts `POST /execute-python`
 - The external MCP server exposes `execute_python(...)`
 - The endpoint remains bound to `127.0.0.1`
-- Imports are blocked by AST validation
-- Private and dunder attribute access is blocked by AST validation
-- Only a restricted builtin whitelist is available at runtime
 
-Do not expose `execute_python` through ngrok or a shared agent setup.
+Goal: sandboxed code can use the exposed Allplan API (`AllplanGeo`, `AllplanIFW`,
+`AllplanSettings`, `AllplanBaseElements` / `AllplanBaseEle`,
+`AllplanBasisElements`, `coord_input`) but cannot reach the operating system
+or the rest of the interpreter.
 
-The AST checks prevent accidents, they are not a security boundary: Python
-introspection (e.g. generator frames) reaches the real builtins. Treat
-`execute_python` as running arbitrary code on your machine, inside the Allplan
-UI thread (an infinite loop freezes Allplan).
+Layers (`python_host/PythonPartsScripts/PythonHost/sandbox/`):
+
+1. Static checks (`validator.py`): no `import`, `global`, `class`, `async`,
+   `yield`, `match`; no name, parameter or attribute starting with `_`; no
+   introspection attributes (`gi_frame`, `f_globals`, `tb_frame`, `mro`, ...);
+   no `str.format` / `format_map` (they read attributes unchecked, use f-strings);
+   no `eval`, `exec`, `getattr`, `open`, ...
+2. Runtime guard (`guard.py`), same principle as RestrictedPython: the code is
+   rewritten so that every attribute access goes through `AttributeGuard`.
+   - Reads: refused on and to frames, code objects, tracebacks, generators and
+     coroutines, to modules other than the exposed ones, and to C functions of
+     other modules (`os.system`, `io.open`), whatever the attribute is called.
+   - Writes and `del`: only properties of objects (`point.X = 5`). Modules,
+     classes and shared objects such as `coord_input` cannot be monkeypatched,
+     so trusted code (this bridge, the PythonParts framework) never ends up
+     calling sandbox code.
+3. Builtins: only a small allowlist (`len`, `range`, `print`, `sorted`, ...).
+
+Regression tests, including known escapes, run without Allplan:
+
+```bash
+python -m unittest discover -s tests
+```
+
+Limits, by design:
+
+- The Allplan API itself is powerful: sandboxed code can modify or delete
+  elements of the open document, like any PythonPart.
+- No timeout: the code runs in the Allplan UI thread, an infinite loop or a
+  huge allocation freezes Allplan (save your work).
+- An in-process Python sandbox has no hard isolation. These layers close the
+  known escape techniques, not unknown ones: do not expose `execute_python`
+  through ngrok or a shared agent setup, and keep reviewing what Claude runs.
 
 The Allplan host rejects requests carrying an `Origin` header or a `Host` other
 than `127.0.0.1:5679` / `localhost:5679`, so web pages cannot drive it
