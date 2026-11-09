@@ -131,8 +131,11 @@ function Install-AllplanMcp {
         if ($claudeCli) {
             Write-Step "Registering the 'allplan' MCP server in Claude Code (user scope)"
             $ErrorActionPreference = "Continue"
-            & $claudeCli.Source mcp remove --scope user allplan *> $null
-            & $claudeCli.Source mcp add --scope user allplan -- $exe --transport stdio
+            # Arguments as arrays: a bare -- typed on the command line can be eaten by PowerShell.
+            $removeArgs = @("mcp", "remove", "--scope", "user", "allplan")
+            $addArgs = @("mcp", "add", "--scope", "user", "allplan", "--", $exe, "--transport", "stdio")
+            & $claudeCli.Source @removeArgs *> $null
+            & $claudeCli.Source @addArgs
             $ErrorActionPreference = "Stop"
         }
     }
@@ -140,7 +143,7 @@ function Install-AllplanMcp {
     Write-Host ""
     Write-Host "Done." -ForegroundColor Green
     Write-Host "  1. Restart Claude Desktop (tray icon > Quit, then reopen)."
-    Write-Host "  2. In Allplan $AllplanVersion: Library > Private > PythonParts > StartPythonHost."
+    Write-Host "  2. In Allplan ${AllplanVersion}: Library > Private > PythonParts > StartPythonHost."
     Write-Host "     Keep it running while Claude works (ESC stops it)."
     Write-Host "  3. Ask Claude: 'Which Allplan version is running?'"
 }
