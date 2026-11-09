@@ -26,6 +26,14 @@ from System.Windows.Threading import DispatcherTimer
 
 os.environ["LIBRARY_ROOTS"] = ";".join(sys.path)
 
+HOST_ADDRESS = "127.0.0.1"
+HOST_PORT = 5679
+
+# Only local, non-browser clients (the MCP server) may call the host. A web page
+# could otherwise POST here (text/plain needs no CORS preflight) or reach it via
+# DNS rebinding, and drive execute_python.
+ALLOWED_HOST_HEADERS = frozenset({f"{HOST_ADDRESS}:{HOST_PORT}", f"localhost:{HOST_PORT}"})
+
 
 print("Load StartPythonHost.py")
 
@@ -70,6 +78,11 @@ class WebRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         """ Handles HTTP POST request
         """
+
+        if (self.headers.get("Host") not in ALLOWED_HOST_HEADERS
+                or self.headers.get("Origin") is not None):
+            self.send_error(403, "Requests from browsers or foreign hosts are not allowed")
+            return
 
         try:
             content_len = int(self.headers.get("Content-Length"))
@@ -174,9 +187,7 @@ class PythonHostInteractor():
         self.palette_service.show_palette(build_ele.script_name)
 
         # start http server
-        address = "127.0.0.1"
-        port = 5679
-        self.server = HTTPServer((address, port), WebRequestHandler)
+        self.server = HTTPServer((HOST_ADDRESS, HOST_PORT), WebRequestHandler)
         self.server.allow_reuse_address = True
         self.server.RequestHandlerClass.request_handler = RequestHandler(self.coord_input)
 
