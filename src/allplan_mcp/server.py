@@ -1,5 +1,8 @@
+"""MCP server exposing the Allplan Python host."""
+
 from __future__ import annotations
 
+import argparse
 import os
 from typing import Annotated, Any
 
@@ -13,6 +16,7 @@ DEFAULT_ALLPLAN_HOST_URL = "http://127.0.0.1:5679"
 DEFAULT_MCP_HOST = "127.0.0.1"
 DEFAULT_MCP_PORT = 8888
 DEFAULT_MCP_PATH = "/mcp"
+DEFAULT_MCP_TRANSPORT = "http"
 
 mcp = FastMCP("Allplan MCP Server")
 skills_manager = SkillsManager()
@@ -185,6 +189,20 @@ def execute_python(
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(prog="allplan-mcp", description=__doc__)
+    parser.add_argument(
+        "--transport",
+        choices=("http", "stdio"),
+        default=os.getenv("MCP_TRANSPORT", DEFAULT_MCP_TRANSPORT),
+        help="stdio for Claude Desktop / Claude Code, http for Streamable HTTP clients.",
+    )
+    args = parser.parse_args()
+
+    if args.transport == "stdio":
+        # stdout carries the MCP protocol: no banner.
+        mcp.run(transport="stdio", show_banner=False)
+        return
+
     host = os.getenv("MCP_HOST", DEFAULT_MCP_HOST)
     port = int(os.getenv("MCP_PORT", str(DEFAULT_MCP_PORT)))
     path = os.getenv("MCP_PATH", DEFAULT_MCP_PATH)

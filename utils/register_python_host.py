@@ -1,92 +1,105 @@
+"""Copy the StartPythonHost PythonPart into the Allplan user (USR) folder.
+
+Layout, as for the official PythonParts examples:
+
+    <Usr>\\Library\\PythonParts\\StartPythonHost.pyp      -> Library > Private > PythonParts
+    <Usr>\\PythonPartsScripts\\PythonHost\\...             (whole package, incl. sandbox/)
+"""
+
 from __future__ import annotations
 
 import argparse
-import json
 import shutil
-import time
+import sys
 from pathlib import Path
 
 
 DEFAULT_ALLPLAN_VERSION = "2026"
-PYTHONPART_FOLDER = "PythonHost"
+PYP_RELATIVE = Path("Library") / "PythonParts" / "StartPythonHost.pyp"
+SCRIPTS_RELATIVE = Path("PythonPartsScripts") / "PythonHost"
+# Where earlier versions of this script put the .pyp (not shown in the Library palette).
+LEGACY_PYP_RELATIVE = Path("PythonParts") / "PythonHost" / "StartPythonHost.pyp"
+
+
+def documents_dir() -> Path:
+    """Real 'Documents' folder, following OneDrive / GPO redirection on Windows."""
+    if sys.platform == "win32":
+        import ctypes
+
+        buffer = ctypes.create_unicode_buffer(260)
+        csidl_personal = 5
+        if ctypes.windll.shell32.SHGetFolderPathW(None, csidl_personal, None, 0, buffer) == 0:
+            return Path(buffer.value)
+    return Path.home() / "Documents"
 
 
 def default_allplan_local(version: str) -> Path:
-    return Path.home() / "Documents" / "Nemetschek" / "Allplan" / version / "Usr" / "Local"
-
-
-def log(log_path: Path, message: str) -> None:
-    with log_path.open("a", encoding="utf-8") as file:
-        file.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
+    return documents_dir() / "Nemetschek" / "Allplan" / version / "Usr" / "Local"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Register the Allplan MCP bridge PythonPart.")
     parser.add_argument("--allplan-version", default=DEFAULT_ALLPLAN_VERSION)
-    parser.add_argument("--allplan-local", type=Path, default=None)
+    parser.add_argument(
+        "--allplan-local",
+        type=Path,
+        default=None,
+        help="Allplan USR folder (Allmenu > Service > Windows Explorer > My own CAD documents).",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
 
-def copy_file(source: Path, target: Path, dry_run: bool) -> None:
-    if dry_run:
-        return
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, target)
-
-
-def main() -> None:
+def main() -> int:
     args = parse_args()
-    repo = Path(__file__).resolve().parent.parent
-    log_path = repo / "utils_log.txt"
-    result_path = repo / "registration_result.json"
+    source_root = Path(__file__).resolve().parent.parent / "python_host"
+    usr = args.allplan_local or default_allplan_local(args.allplan_version)
 
-    for output in (log_path, result_path):
-        if output.exists():
-            output.unlink()
+    if not usr.is_dir():
+        print(
+            f"ERROR: Allplan USR folder not found: {usr}\n"
+            "Start Allplan once, or find the folder via Allmenu > Service > "
+            "Windows Explorer > My own CAD documents, then pass it with --allplan-local.",
+            file=sys.stderr,
+        )
+        return 1
 
-    allplan_local = args.allplan_local or default_allplan_local(args.allplan_version)
-    source_pyp = repo / "python_host" / "Library" / "PythonParts" / "StartPythonHost.pyp"
-    source_scripts = repo / "python_host" / "PythonPartsScripts" / PYTHONPART_FOLDER
+    source_pyp = source_root / PYP_RELATIVE
+    source_scripts = source_root / SCRIPTS_RELATIVE
+    target_pyp = usr / PYP_RELATIVE
+    target_scripts = usr / SCRIPTS_RELATIVE
+    legacy_pyp = usr / LEGACY_PYP_RELATIVE
 
-    if not source_pyp.exists():
-        raise FileNotFoundError(source_pyp)
-    if not source_scripts.exists():
-        raise FileNotFoundError(source_scripts)
+    print(f"Allplan USR folder : {usr}")
+    print(f"PythonPart         : {target_pyp}")
+    print(f"Scripts            : {target_scripts}")
 
-    pyp_target = allplan_local / "PythonParts" / PYTHONPART_FOLDER / source_pyp.name
-    script_target_dir = allplan_local / "PythonPartsScripts" / PYTHONPART_FOLDER
-
-    copied_files: list[dict[str, str]] = []
-    copy_file(source_pyp, pyp_target, args.dry_run)
-    copied_files.append({"source": str(source_pyp), "target": str(pyp_target)})
-
-    for source_file in sorted(source_scripts.glob("*.py")):
-        target_file = script_target_dir / source_file.name
-        copy_file(source_file, target_file, args.dry_run)
-        copied_files.append({"source": str(source_file), "target": str(target_file)})
-
-    log(log_path, f"Registered PythonPart at {pyp_target}.")
-    log(log_path, f"Registered scripts at {script_target_dir}.")
     if args.dry_run:
-        log(log_path, "Dry run only. No files were copied.")
+        print("Dry run: nothing copied.")
+        return 0
 
-    result = {
-        "pythonpart_name": "StartPythonHost",
-        "allplan_local": str(allplan_local),
-        "pythonpart_path": str(pyp_target),
-        "script_folder": str(script_target_dir),
-        "copied_files": copied_files,
-        "dry_run": args.dry_run,
-        "next_steps": [
-            "Open or restart Allplan.",
-            "Open the Library palette.",
-            "Run StartPythonHost from the PythonParts library.",
-            "Keep StartPythonHost running while the external MCP server is used.",
-        ],
-    }
-    result_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    target_pyp.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_pyp, target_pyp)
+
+    # Replace the whole package so files removed from the repo do not linger.
+    if target_scripts.exists():
+        shutil.rmtree(target_scripts)
+    shutil.copytree(
+        source_scripts,
+        target_scripts,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+
+    if legacy_pyp.exists():
+        legacy_pyp.unlink()
+        if not any(legacy_pyp.parent.iterdir()):
+            legacy_pyp.parent.rmdir()
+        print(f"Removed legacy copy: {legacy_pyp}")
+
+    print("Done. In Allplan: Library > Private > PythonParts > StartPythonHost (ESC stops it).")
+    print("If StartPythonHost already ran in this Allplan session, restart Allplan to reload it.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
