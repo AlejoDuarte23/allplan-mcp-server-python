@@ -97,6 +97,11 @@ class SandboxAstValidator(ast.NodeVisitor):
 
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
         check_identifier("exception name", node.name)
+        if node.type is None:
+            # A bare except would catch the time limit and keep looping.
+            raise SandboxValidationError(
+                "bare 'except:' is not allowed in execute_python; use 'except Exception:'."
+            )
         self.generic_visit(node)
 
 

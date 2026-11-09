@@ -17,15 +17,19 @@ DEFAULT_MCP_HOST = "127.0.0.1"
 DEFAULT_MCP_PORT = 8888
 DEFAULT_MCP_PATH = "/mcp"
 DEFAULT_MCP_TRANSPORT = "http"
+# Mirrors python_host/.../sandbox/const.py
+DEFAULT_EXEC_TIMEOUT_SECONDS = 20.0
+MAX_EXEC_TIMEOUT_SECONDS = 300.0
+EXEC_HTTP_TIMEOUT_MARGIN_SECONDS = 15.0
 
 mcp = FastMCP("Allplan MCP Server")
 skills_manager = SkillsManager()
 
 
-def _allplan_client() -> AllplanHostClient:
+def _allplan_client(min_timeout: float = 0.0) -> AllplanHostClient:
     return AllplanHostClient(
         base_url=os.getenv("ALLPLAN_HOST_URL", DEFAULT_ALLPLAN_HOST_URL),
-        timeout=float(os.getenv("ALLPLAN_HOST_TIMEOUT", "30")),
+        timeout=max(float(os.getenv("ALLPLAN_HOST_TIMEOUT", "30")), min_timeout),
     )
 
 
@@ -175,8 +179,15 @@ def create_box(length: float, width: float, height: float) -> dict[str, Any]:
 def execute_python(
     code: str,
     result_expression: str | None = None,
+    timeout_seconds: float = DEFAULT_EXEC_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
-    """Execute sandboxed Python inside the running Allplan (UI thread, no timeout).
+    """Execute sandboxed Python inside the running Allplan (UI thread).
+
+    Time limit: timeout_seconds (default 20, max 300), checked at every loop
+    iteration and call. When exceeded the response is
+    {"ok": false, "timed_out": true, "error": ..., "stdout": ...}; changes made
+    before the interruption stay in the document. Allplan is frozen while the
+    code runs, so prefer short, bounded scripts.
 
     Available names: AllplanGeo, AllplanIFW, AllplanSettings, AllplanBaseElements
     (alias AllplanBaseEle), AllplanBasisElements, coord_input, and a small set of
@@ -193,12 +204,16 @@ def execute_python(
 
     if not code.strip():
         raise ValueError("code must be a non-empty string.")
+    if not 0 < timeout_seconds <= MAX_EXEC_TIMEOUT_SECONDS:
+        raise ValueError(f"timeout_seconds must be in ]0, {MAX_EXEC_TIMEOUT_SECONDS:g}].")
 
-    payload: dict[str, Any] = {"code": code}
+    payload: dict[str, Any] = {"code": code, "timeout_seconds": timeout_seconds}
     if result_expression is not None:
         payload["result_expression"] = result_expression
 
-    return _allplan_client().post("/execute-python", payload)
+    # Allplan answers once the sandbox has stopped: wait longer than its limit.
+    client = _allplan_client(min_timeout=timeout_seconds + EXEC_HTTP_TIMEOUT_MARGIN_SECONDS)
+    return client.post("/execute-python", payload)
 
 
 def main() -> None:

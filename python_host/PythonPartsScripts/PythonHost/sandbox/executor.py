@@ -12,8 +12,8 @@ import NemAll_Python_BasisElements as AllplanBasisElements
 import NemAll_Python_Geometry as AllplanGeo
 import NemAll_Python_IFW_Input as AllplanIFW
 
-from .const import allowed_builtin_names
-from .guard import SandboxGuard, compile_guarded
+from .const import DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS, allowed_builtin_names
+from .guard import SandboxGuard, SandboxTimeoutError, compile_guarded
 from .validator import SandboxValidator
 
 
@@ -45,6 +45,16 @@ class SandboxExecutor:
         if result_expression is not None and not isinstance(result_expression, str):
             raise Exception("'result_expression' must be a string when provided.")
 
+        timeout_seconds = request.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
+        if (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or not 0 < timeout_seconds <= MAX_TIMEOUT_SECONDS
+        ):
+            raise Exception(
+                f"'timeout_seconds' must be a number greater than 0 and at most {MAX_TIMEOUT_SECONDS:g}."
+            )
+
         compiled_code = compile_guarded(self.validator.validate_exec(code), "exec")
         compiled_result = (
             compile_guarded(self.validator.validate_eval(result_expression), "eval")
@@ -65,16 +75,24 @@ class SandboxExecutor:
             "coord_input": self.coord_input,
             **modules,
         }
-        SandboxGuard(modules.values(), exec_scope).install()
         stdout_buffer = io.StringIO()
+        SandboxGuard(modules.values(), exec_scope, float(timeout_seconds)).install()
 
-        with contextlib.redirect_stdout(stdout_buffer):
-            exec(compiled_code, exec_scope, exec_scope)
+        try:
+            with contextlib.redirect_stdout(stdout_buffer):
+                exec(compiled_code, exec_scope, exec_scope)
 
-            if compiled_result is not None:
-                result_value = eval(compiled_result, exec_scope, exec_scope)
-            else:
-                result_value = exec_scope.get("result")
+                if compiled_result is not None:
+                    result_value = eval(compiled_result, exec_scope, exec_scope)
+                else:
+                    result_value = exec_scope.get("result")
+        except SandboxTimeoutError as error:
+            return {
+                "ok": False,
+                "timed_out": True,
+                "error": str(error),
+                "stdout": stdout_buffer.getvalue(),
+            }
 
         return {
             "ok": True,

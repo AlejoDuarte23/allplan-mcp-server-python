@@ -21,12 +21,20 @@ builtins, Boost.Python and NemAll_Python_* (file objects, Popen, os.environ...).
 Writes only reach properties: modules, classes and shared objects such as
 coord_input are used by trusted code (this bridge, the PythonParts framework),
 monkeypatching them would make trusted code call sandbox code later.
+
+Time limit: the code runs in the Allplan UI thread and cannot be killed, so the
+guard checks a deadline at the top of every loop iteration (while, for,
+comprehensions) and on every call. Past the deadline it raises
+SandboxTimeoutError, a BaseException the sandboxed code cannot catch (bare
+`except:` is refused), at every following check. A single long C operation
+(sum(range(10**15)), 10**10**9) is not interrupted.
 """
 
 from __future__ import annotations
 
 import ast
 import operator
+import time
 import types
 from collections.abc import Iterable
 from typing import Any, Callable
@@ -40,6 +48,11 @@ GUARD_SETATTR_TARGET_NAME = "_sandbox_setattr_target_"
 GUARD_AUGATTR_NAME = "_sandbox_augattr_"
 GUARD_CALL_NAME = "_sandbox_call_"
 GUARD_CHECK_NAME = "_sandbox_check_"
+GUARD_TICK_NAME = "_sandbox_tick_"
+
+
+class SandboxTimeoutError(BaseException):
+    """Time limit exceeded. Not an Exception: `except Exception` must not stop it."""
 
 # No attribute of these may be read (gi_frame, f_back, tb_frame, ...).
 introspection_types: tuple[type, ...] = (
@@ -87,15 +100,19 @@ class SandboxGuard:
         self,
         allowed_modules: Iterable[types.ModuleType],
         sandbox_globals: dict[str, Any],
+        timeout_seconds: float,
     ) -> None:
         self.allowed_modules = frozenset(allowed_modules)
         # Functions defined by the sandbox code share its globals.
         self.sandbox_globals = sandbox_globals
         self.safe_builtin_ids = frozenset(id(value) for value in sandbox_globals["__builtins__"].values())
+        self.timeout_seconds = timeout_seconds
+        self.deadline = time.monotonic() + timeout_seconds
 
     def install(self) -> None:
-        """Expose the guard functions to the rewritten code"""
+        """Expose the guard functions to the rewritten code and start the clock"""
 
+        self.deadline = time.monotonic() + self.timeout_seconds
         self.sandbox_globals.update(
             {
                 GUARD_GETATTR_NAME: self.getattr,
@@ -103,8 +120,20 @@ class SandboxGuard:
                 GUARD_AUGATTR_NAME: self.augattr,
                 GUARD_CALL_NAME: self.call,
                 GUARD_CHECK_NAME: self.check,
+                GUARD_TICK_NAME: self.tick,
             }
         )
+
+    def tick(self) -> bool:
+        """Deadline check; returns True so it can sit in a comprehension `if`"""
+
+        if time.monotonic() > self.deadline:
+            raise SandboxTimeoutError(
+                f"execute_python stopped after the {self.timeout_seconds:g} s time limit. "
+                "Changes made before that are kept (undo them in Allplan if needed); "
+                "pass a larger timeout_seconds if the work is legitimately long."
+            )
+        return True
 
     # Policy
 
@@ -175,6 +204,7 @@ class SandboxGuard:
         return value
 
     def call(self, func: Any, /, *args: Any, **kwargs: Any) -> Any:
+        self.tick()
         if self.is_forbidden_value(func):
             raise SandboxValidationError(
                 f"calling this {describe(func)} object is not allowed in execute_python."
@@ -263,11 +293,18 @@ class GuardTransformer(ast.NodeTransformer):
     def visit_For(self, node: ast.For) -> ast.AST:
         self.generic_visit(node)
         node.iter = checked(node.iter)
+        node.body.insert(0, tick_statement(node.body[0]))
+        return node
+
+    def visit_While(self, node: ast.While) -> ast.AST:
+        self.generic_visit(node)
+        node.body.insert(0, tick_statement(node.body[0]))
         return node
 
     def visit_comprehension(self, node: ast.comprehension) -> ast.AST:
         self.generic_visit(node)
         node.iter = checked(node.iter)
+        node.ifs.insert(0, tick_call())
         return node
 
     def visit_With(self, node: ast.With) -> ast.AST:
@@ -305,6 +342,14 @@ def guard_call(guard_name: str, obj: ast.expr, attr: str) -> ast.Call:
         args=[obj, ast.Constant(value=attr)],
         keywords=[],
     )
+
+
+def tick_call() -> ast.Call:
+    return ast.Call(func=ast.Name(id=GUARD_TICK_NAME, ctx=ast.Load()), args=[], keywords=[])
+
+
+def tick_statement(location: ast.AST) -> ast.Expr:
+    return ast.copy_location(ast.Expr(value=tick_call()), location)
 
 
 def checked(expr: ast.expr) -> ast.expr:

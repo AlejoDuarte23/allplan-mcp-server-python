@@ -6,6 +6,10 @@ from typing import Annotated
 BuiltinName = Annotated[str, "Sandbox builtin name"]
 AttributeName = Annotated[str, "Sandbox attribute name"]
 
+# Execution time limit. Keep the default below the MCP server's HTTP timeout.
+DEFAULT_TIMEOUT_SECONDS = 20.0
+MAX_TIMEOUT_SECONDS = 300.0
+
 # Attributes that reach interpreter internals (generator/coroutine frames, frame
 # globals, tracebacks), or that read attributes without going through the guard
 # (str.format / format_map: "{0.gi_frame}".format(gen)).

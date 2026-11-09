@@ -6,6 +6,7 @@ import builtins
 import contextlib
 import os
 import sys
+import time
 import types
 import unittest
 from pathlib import Path
@@ -204,6 +205,53 @@ class EscapeTest(unittest.TestCase):
                 "g = (g.gi_frame.f_back.f_globals for x in [1])\n"
                 "result = list(g)\n"
             )
+
+
+class TimeoutTest(unittest.TestCase):
+    timeout = 0.3
+
+    def assert_timed_out(self, code: str) -> dict:
+        start = time.monotonic()
+        response = SandboxExecutor(CoordInput()).execute({"code": code, "timeout_seconds": self.timeout})
+        self.assertLess(time.monotonic() - start, self.timeout + 2)
+        self.assertEqual(response["ok"], False)
+        self.assertTrue(response["timed_out"])
+        self.assertIn("time limit", response["error"])
+        return response
+
+    def test_infinite_loops_stopped(self) -> None:
+        for code in (
+            "while True:\n    pass",
+            "for i in range(10**12):\n    pass",
+            "result = sum(1 for x in range(10**12))",
+            "result = [x for x in range(10**12)]",
+            "def spin():\n    while True:\n        x = 1\nspin()",
+        ):
+            with self.subTest(code=code):
+                self.assert_timed_out(code)
+
+    def test_limit_cannot_be_swallowed(self) -> None:
+        for code in (
+            "while True:\n    try:\n        pass\n    except Exception:\n        pass",
+            "def f():\n    try:\n        while True:\n            pass\n    finally:\n        return 1\n"
+            "while True:\n    f()",
+            "def f():\n    try:\n        f()\n    finally:\n        return f()\nf()",
+        ):
+            with self.subTest(code=code):
+                self.assert_timed_out(code)
+
+    def test_partial_stdout_returned(self) -> None:
+        response = self.assert_timed_out("i = 0\nwhile True:\n    i += 1\n    if i == 3:\n        print('reached 3')")
+        self.assertEqual(response["stdout"], "reached 3\n")
+
+    def test_bare_except_blocked(self) -> None:
+        with self.assertRaises(SandboxValidationError):
+            run("try:\n    pass\nexcept:\n    pass")
+
+    def test_invalid_timeout_rejected(self) -> None:
+        for value in (0, -1, 1000, True, "5"):
+            with self.subTest(value=value), self.assertRaises(Exception):
+                SandboxExecutor(CoordInput()).execute({"code": "result = 1", "timeout_seconds": value})
 
 
 class MonkeypatchTest(unittest.TestCase):

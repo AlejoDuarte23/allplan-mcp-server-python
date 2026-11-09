@@ -185,6 +185,13 @@ Layers (`python_host/PythonPartsScripts/PythonHost/sandbox/`):
      monkeypatched, so trusted code (this bridge, the PythonParts framework)
      never ends up calling sandbox code.
 3. Builtins: only a small allowlist (`len`, `range`, `print`, `sorted`, ...).
+4. Time limit: `timeout_seconds` (default 20 s, max 300 s). The code runs in
+   the Allplan UI thread and cannot be killed, so the guard checks the deadline
+   at every loop iteration (`while`, `for`, comprehensions) and every call, then
+   raises an error the sandboxed code cannot catch (`except Exception` does not
+   stop it, bare `except:` is refused). The response is
+   `{"ok": false, "timed_out": true, "error": ..., "stdout": ...}` and the MCP
+   server waits `timeout_seconds + 15` s for it.
 
 The policy trusts what comes from the Allplan API (`NemAll_Python_*` modules and
 Boost.Python types). If a legitimate Allplan object is refused, the error names
@@ -200,8 +207,10 @@ Limits, by design:
 
 - The Allplan API itself is powerful: sandboxed code can modify or delete
   elements of the open document, like any PythonPart.
-- No timeout: the code runs in the Allplan UI thread, an infinite loop or a
-  huge allocation freezes Allplan (save your work).
+- Allplan is frozen while the code runs, up to the time limit. A single long C
+  operation (`sum(range(10**15))`, `10**10**9`, a huge allocation) is not
+  interrupted. Work done before an interruption stays in the document (undo it
+  in Allplan). Save your work before experimenting.
 - An in-process Python sandbox has no hard isolation. These layers close the
   known escape techniques, not unknown ones: do not expose `execute_python`
   through ngrok or a shared agent setup, and keep reviewing what Claude runs.
