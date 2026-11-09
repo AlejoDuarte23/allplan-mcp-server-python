@@ -6,39 +6,78 @@ The existing Allplan PythonPart starts a small local HTTP host at `127.0.0.1:567
 This package adds a FastMCP server in front of it, so agents can call MCP tools
 over Streamable HTTP at `/mcp`.
 
-## Setup
+## Install (Windows, one line)
+
+Open PowerShell (or cmd) on the machine where Allplan is installed:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/viorizz/AllPlan_MCP/main/install.ps1 | iex"
+```
+
+From a clone or an extracted ZIP, double-click `install.cmd` instead.
+
+The installer (`install.ps1`) is idempotent; re-run it to update. It:
+
+1. installs [uv](https://docs.astral.sh/uv/) if missing (uv also fetches a Python for the server),
+2. downloads this repo to `%LOCALAPPDATA%\AllplanMCP\app` (or uses the clone it runs from),
+3. runs `uv sync`,
+4. copies the PythonPart into the Allplan USR folder (default
+   `Documents\Nemetschek\Allplan\2026\Usr\Local`):
+   - `Library\PythonParts\StartPythonHost.pyp`
+   - `PythonPartsScripts\PythonHost\` (with the `sandbox` package)
+5. adds an `allplan` stdio server to Claude Desktop
+   (`%APPDATA%\Claude\claude_desktop_config.json`, a `.bak` is kept) and, if the
+   `claude` CLI is installed, to Claude Code (user scope).
+
+Options, as parameters of `install.ps1` or environment variables with the one-liner:
+
+| Parameter           | Environment variable | Default                       |
+| ------------------- | -------------------- | ----------------------------- |
+| `-AllplanVersion`   | `ALLPLAN_VERSION`    | `2026`                        |
+| `-AllplanUsr`       | `ALLPLAN_USR`        | `Documents\Nemetschek\Allplan\<version>\Usr\Local` |
+| `-Ref`              | `ALLPLAN_MCP_REF`    | `main`                        |
+| `-InstallDir`       | `ALLPLAN_MCP_DIR`    | `%LOCALAPPDATA%\AllplanMCP`   |
+| `-SkipClaudeConfig` |                      | off                           |
+
+If your USR folder is elsewhere, find it in Allplan via
+Allmenu > Service > Windows Explorer > My own CAD documents.
+
+Then:
+
+1. Restart Claude Desktop (tray icon > Quit, then reopen).
+2. In Allplan: Library > Private > PythonParts > `StartPythonHost`. Keep it
+   running while Claude works; ESC stops it.
+
+## Manual setup
 
 ```bash
 uv sync
+utils\register_python_host.cmd            # --allplan-version 2025, --allplan-local <USR folder>
 ```
 
-Register the Allplan PythonPart bridge on the Windows machine where Allplan is
-installed:
+Claude Desktop (`claude_desktop_config.json`):
 
-```cmd
-utils\register_python_host.cmd
+```json
+{
+  "mcpServers": {
+    "allplan": {
+      "command": "C:\\path\\to\\AllPlan_MCP\\.venv\\Scripts\\allplan-mcp.exe",
+      "args": ["--transport", "stdio"]
+    }
+  }
+}
 ```
 
-By default this copies the bridge to:
-
-```text
-%USERPROFILE%\Documents\Nemetschek\Allplan\2026\Usr\Local\PythonParts\PythonHost
-%USERPROFILE%\Documents\Nemetschek\Allplan\2026\Usr\Local\PythonPartsScripts\PythonHost
-```
-
-For a different Allplan version:
-
-```cmd
-utils\register_python_host.cmd --allplan-version 2025
-```
-
-In Allplan, start the `StartPythonHost` PythonPart after registration. It must
-keep running while the MCP server is being used.
-
-## Run locally
+Claude Code:
 
 ```bash
-uv run allplan-mcp
+claude mcp add --scope user allplan -- C:\path\to\AllPlan_MCP\.venv\Scripts\allplan-mcp.exe --transport stdio
+```
+
+## Run as an HTTP server
+
+```bash
+uv run allplan-mcp                       # --transport http (default), or --transport stdio
 ```
 
 By default this starts the MCP server at:
@@ -51,6 +90,7 @@ Useful environment variables:
 
 ```bash
 ALLPLAN_HOST_URL=http://127.0.0.1:5679
+MCP_TRANSPORT=http
 MCP_HOST=127.0.0.1
 MCP_PORT=8888
 MCP_PATH=/mcp
@@ -113,13 +153,68 @@ depend on cross imports between skill folders.
 
 The bridge exposes a sandboxed Python execution path for local experiments.
 
-Behavior:
-
 - The raw Allplan bridge accepts `POST /execute-python`
 - The external MCP server exposes `execute_python(...)`
 - The endpoint remains bound to `127.0.0.1`
-- Imports are blocked by AST validation
-- Private and dunder attribute access is blocked by AST validation
-- Only a restricted builtin whitelist is available at runtime
 
-Do not expose `execute_python` through ngrok or a shared agent setup.
+Goal: sandboxed code can use the exposed Allplan API (`AllplanGeo`, `AllplanIFW`,
+`AllplanSettings`, `AllplanBaseElements` / `AllplanBaseEle`,
+`AllplanBasisElements`, `coord_input`) but cannot reach the operating system
+or the rest of the interpreter.
+
+Layers (`python_host/PythonPartsScripts/PythonHost/sandbox/`):
+
+1. Static checks (`validator.py`): no `import`, `global`, `class`, `async`,
+   `yield`, `match`, decorators; no name, parameter or attribute starting with
+   `_`; no introspection attributes (`gi_frame`, `f_globals`, `tb_frame`, `mro`,
+   ...); no `str.format` / `format_map` (they read attributes unchecked, use
+   f-strings); no `eval`, `exec`, `getattr`, `open`, ...
+2. Runtime guard (`guard.py`), same principle as RestrictedPython: the code is
+   rewritten so that values are checked where they are *used*, whatever brought
+   them in (attribute, subscript, iteration, `with`, call result):
+   - every attribute read, every call (callee and arguments, so `map(f, ...)` or
+     `sorted(key=f)` are covered too), every subscript, iteration, unpacking and
+     `with` goes through `SandboxGuard`;
+   - refused values: frames, code objects, tracebacks; modules other than the
+     exposed ones; Python functions not defined by the sandboxed code; C
+     functions bound to such objects (`os.system`, `io.open`, `builtins.eval`);
+     classes and instances from modules other than `builtins`, `Boost.Python`
+     and `NemAll_Python_*` (file objects, `os.environ`, `subprocess.Popen`...);
+   - attribute writes and `del`: only properties of objects (`point.X = 5`).
+     Modules, classes and shared objects such as `coord_input` cannot be
+     monkeypatched, so trusted code (this bridge, the PythonParts framework)
+     never ends up calling sandbox code.
+3. Builtins: only a small allowlist (`len`, `range`, `print`, `sorted`, ...).
+4. Time limit: `timeout_seconds` (default 20 s, max 300 s). The code runs in
+   the Allplan UI thread and cannot be killed, so the guard checks the deadline
+   at every loop iteration (`while`, `for`, comprehensions) and every call, then
+   raises an error the sandboxed code cannot catch (`except Exception` does not
+   stop it, bare `except:` is refused). The response is
+   `{"ok": false, "timed_out": true, "error": ..., "stdout": ...}` and the MCP
+   server waits `timeout_seconds + 15` s for it.
+
+The policy trusts what comes from the Allplan API (`NemAll_Python_*` modules and
+Boost.Python types). If a legitimate Allplan object is refused, the error names
+its type and module (`... leads to a <module>.<Type> object`): report it.
+
+Regression tests, including known escapes, run without Allplan:
+
+```bash
+python -m unittest discover -s tests
+```
+
+Limits, by design:
+
+- The Allplan API itself is powerful: sandboxed code can modify or delete
+  elements of the open document, like any PythonPart.
+- Allplan is frozen while the code runs, up to the time limit. A single long C
+  operation (`sum(range(10**15))`, `10**10**9`, a huge allocation) is not
+  interrupted. Work done before an interruption stays in the document (undo it
+  in Allplan). Save your work before experimenting.
+- An in-process Python sandbox has no hard isolation. These layers close the
+  known escape techniques, not unknown ones: do not expose `execute_python`
+  through ngrok or a shared agent setup, and keep reviewing what Claude runs.
+
+The Allplan host rejects requests carrying an `Origin` header or a `Host` other
+than `127.0.0.1:5679` / `localhost:5679`, so web pages cannot drive it
+(CSRF / DNS rebinding).
